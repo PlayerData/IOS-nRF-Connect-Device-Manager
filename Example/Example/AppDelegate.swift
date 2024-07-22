@@ -6,7 +6,7 @@
 
 import UIKit
 import os.log
-import McuManager
+import iOSMcuManagerLibrary
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -60,6 +60,14 @@ extension AppDelegate: McuMgrLogDelegate {
         } else {
             NSLog("%@", msg)
         }
+    }
+    
+    func minLogLevel() -> McuMgrLogLevel {
+        #if DEBUG
+        return .debug
+        #else
+        return .info
+        #endif
     }
     
 }

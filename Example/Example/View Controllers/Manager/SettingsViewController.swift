@@ -5,7 +5,7 @@
  */
 
 import UIKit
-import McuManager
+import iOSMcuManagerLibrary
 
 class SettingsViewController: UIViewController, McuMgrViewController {
 
@@ -20,9 +20,9 @@ class SettingsViewController: UIViewController, McuMgrViewController {
     }
     
     private var basicManager: BasicManager!
-    var transporter: McuMgrTransport! {
+    var transport: McuMgrTransport! {
         didSet {
-            basicManager = BasicManager(transporter: transporter)
+            basicManager = BasicManager(transport: transport)
             basicManager.logDelegate = UIApplication.shared.delegate as? McuMgrLogDelegate
         }
     }
@@ -33,6 +33,11 @@ class SettingsViewController: UIViewController, McuMgrViewController {
     
     private func done() {
         factoryResetButton.isEnabled = true
+    }
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.translatesAutoresizingMaskIntoConstraints = false
     }
 
 }

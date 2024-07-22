@@ -17,14 +17,16 @@ public class BasicManager: McuManager {
     
     // MARK: - Constants
 
+    public static let MAX_ECHO_MESSAGE_SIZE_BYTES = 2475
+    
     enum ID: UInt8 {
-        case Reset = 0
+        case reset = 0
     }
     
     // MARK: - Init
     
-    public init(transporter: McuMgrTransport) {
-        super.init(group: .basic, transporter: transporter)
+    public init(transport: McuMgrTransport) {
+        super.init(group: .basic, transport: transport)
     }
     
     // MARK: - Commands
@@ -33,6 +35,31 @@ public class BasicManager: McuManager {
     ///
     /// - parameter callback: The response callback with a ``McuMgrResponse``.
     public func eraseAppSettings(callback: @escaping McuMgrCallback<McuMgrResponse>) {
-        send(op: .write, commandId: ID.Reset.rawValue, payload: [:], callback: callback)
+        send(op: .write, commandId: ID.reset, payload: [:], timeout: McuManager.FAST_TIMEOUT, callback: callback)
+    }
+}
+
+// MARK: - BasicManagerError
+
+public enum BasicManagerError: UInt64, Error, LocalizedError {
+    case noError = 0
+    case unknown = 1
+    case flashOpenFailed = 2
+    case flashConfigQueryFailed = 3
+    case flashEraseFailed = 4
+    
+    public var errorDescription: String? {
+        switch self {
+        case .noError:
+            return "Success"
+        case .unknown:
+            return "Unknown error"
+        case .flashOpenFailed:
+            return "Opening flash area failed"
+        case .flashConfigQueryFailed:
+            return "Querying flash area parameters failed"
+        case .flashEraseFailed:
+            return "Erasing flash area failed"
+        }
     }
 }

@@ -18,12 +18,17 @@ open class McuMgrResponse: CBORMappable {
     /// assumed.
     public var rc: UInt64 = 0
     
+    /**
+     In SMPv2, when a Request makes it into a specific Group, that Group may
+     return its own kind of Return Code or Error.
+     */
+    public var groupRC: McuMgrGroupReturnCode?
+    
     //**************************************************************************
     // MARK: Response Properties
     //**************************************************************************
 
-    /// The transport scheme used by the transporter. This is used to determine
-    /// how to parse the raw packet.
+    /// The transport's scheme. This is used to determine how to parse the raw packet.
     public var scheme: McuMgrScheme!
     
     /// The response's raw packet data. For CoAP transport schemes, this will
@@ -39,9 +44,9 @@ open class McuMgrResponse: CBORMappable {
     /// The raw McuMgrResponse payload.
     public var payloadData: Data?
     
-    /// The repsponse's return code obtained from the payload. If no return code
-    /// is explicitly stated, OK (0) is assumed.
-    public var returnCode: McuMgrReturnCode = .ok
+    /// The response's result obtained from the payload. If no Return Code (RC)
+    /// or Group Error is explicitly stated, success is assumed.
+    public var result: Result<Void, McuMgrError> = .success(())
     
     /// The CoAP Response code for CoAP based transport schemes. For non-CoAP
     /// transport schemes this value will always be 0
@@ -53,6 +58,9 @@ open class McuMgrResponse: CBORMappable {
     
     public required init(cbor: CBOR?) throws {
         try super.init(cbor: cbor)
+        if case let CBOR.map(err)? = cbor?["err"] {
+            self.groupRC = try McuMgrGroupReturnCode(map: err)
+        }
         if case let CBOR.unsignedInt(rc)? = cbor?["rc"] {
             self.rc = rc
         }
@@ -62,8 +70,17 @@ open class McuMgrResponse: CBORMappable {
     // MARK: Functions
     //**************************************************************************
     
-    public func isSuccess() -> Bool {
-        return returnCode.isSuccess()
+    /**
+     Returns `LocalizedError` if any is present. Either Group Error or McuManager
+     Error. If `nil`, success scenario can be assumed.
+     */
+    public func getError() -> LocalizedError? {
+        switch result {
+        case .success:
+            return nil
+        case .failure(let error):
+            return error
+        }
     }
     
     //**************************************************************************
@@ -77,9 +94,9 @@ open class McuMgrResponse: CBORMappable {
     /// CBOR payload. An object of type <T> will be initialized which will map
     /// the CBOR payload values to the values in the object.
     ///
-    /// - parameter scheme: the transport scheme of the transporter.
+    /// - parameter scheme: the transport's scheme.
     /// - parameter data: The response's raw packet data.
-    /// - parameter coapPaylaod: (Optional) payload for CoAP transport schemes.
+    /// - parameter coapPayload: (Optional) payload for CoAP transport schemes.
     /// - parameter coapCode: (Optional) CoAP response code.
     ///
     /// - returns: The McuMgrResponse on success or nil on failure.
@@ -134,7 +151,13 @@ open class McuMgrResponse: CBORMappable {
         response.header = header
         response.scheme = scheme
         response.rawData = bytes
-        response.returnCode = McuMgrReturnCode(rawValue: response.rc) ?? .unrecognized
+        if let groupRC = response.groupRC, groupRC.rc != 0 {
+            response.result = .failure(.groupCode(groupRC))
+        } else if let returnCode = McuMgrReturnCode(rawValue: response.rc), returnCode != .ok {
+            response.result = .failure(.returnCode(returnCode))
+        } else {
+            response.result = .success(())
+        }
         response.coapCode = coapCode
         
         return response
@@ -147,7 +170,7 @@ open class McuMgrResponse: CBORMappable {
     /// CBOR payload, An object of type <T> will be initialized which will map
     /// the CBOR payload values to the values in the object.
     ///
-    /// - parameter scheme: the transport scheme of the transporter.
+    /// - parameter scheme: the transport's scheme.
     /// - parameter data: The response's raw packet data.
     ///
     /// - returns: The McuMgrResponse on success or nil on failure.
@@ -163,7 +186,7 @@ open class McuMgrResponse: CBORMappable {
     /// CBOR payload, An object of type <T> will be initialized which will map
     /// the CBOR payload values to the values in the object.
     ///
-    /// - parameter scheme: The transport scheme of the transporter.
+    /// - parameter scheme: The transport's scheme.
     /// - parameter data: The response's raw packet data.
     /// - parameter coapPayload: The CoAP payload of the response.
     /// - parameter codeClass: The CoAP response code class.
@@ -178,7 +201,7 @@ open class McuMgrResponse: CBORMappable {
     // MARK: Utilities
     //**************************************************************************
     
-    /// Gets the expected length of the entire respose from the length field in
+    /// Gets the expected length of the entire response from the length field in
     /// the McuMgrHeader. The return value includes the 8-byte McuMgr header.
     ///
     /// - parameter scheme: The transport scheme (Must be BLE to use this
@@ -198,19 +221,13 @@ open class McuMgrResponse: CBORMappable {
     }
 }
 
-extension McuMgrResponse: CustomStringConvertible {
-    
-    public var description: String {
-        return payload?.description ?? "nil"
-    }
-}
-
 extension McuMgrResponse: CustomDebugStringConvertible {
     
     /// String representation of the response.
     public var debugDescription: String {
         return "Header: \(self.header!), Payload: \(payload?.description ?? "nil")"
     }
+    
 }
 
 //******************************************************************************
@@ -227,9 +244,9 @@ extension McuMgrResponseParseError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .invalidDataSize:
-            return "Invalid data size."
+            return "Invalid data size"
         case .invalidPayload:
-            return "Invalid payload."
+            return "Invalid payload"
         }
     }
     
@@ -251,6 +268,8 @@ public class McuMgrEchoResponse: McuMgrResponse {
         }
     }
 }
+
+// MARK: - McuMgrTaskStatsResponse
 
 public class McuMgrTaskStatsResponse: McuMgrResponse {
     
@@ -300,6 +319,35 @@ public class McuMgrTaskStatsResponse: McuMgrResponse {
     }
 }
 
+// MARK: - McuMgrExecResponse
+
+public class McuMgrExecResponse: McuMgrResponse {
+    
+    /// Command output.
+    public var output: String?
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.utf8String(output)? = cbor?["o"] {
+            self.output = output
+        }
+    }
+    
+    public override func getError() -> LocalizedError? {
+        switch result {
+        case .success:
+            return nil
+        case .failure(let error):
+            guard let shellError = ShellManagerError(rawValue: rc) else {
+                return error
+            }
+            return shellError
+        }
+    }
+}
+
+// MARK: - McuMgrMemoryPoolStatsResponse
+
 public class McuMgrMemoryPoolStatsResponse: McuMgrResponse {
     
     /// A map of task names to task statistics.
@@ -333,6 +381,8 @@ public class McuMgrMemoryPoolStatsResponse: McuMgrResponse {
     }
 }
 
+// MARK: - McuMgrDateTimeResponse
+
 public class McuMgrDateTimeResponse: McuMgrResponse {
     
     /// String representation of the datetime on the device.
@@ -342,6 +392,396 @@ public class McuMgrDateTimeResponse: McuMgrResponse {
         try super.init(cbor: cbor)
         if case let CBOR.utf8String(datetime)? = cbor?["datetime"] {
             self.datetime = datetime
+        }
+    }
+}
+
+// MARK: - McuMgrParametersResponse
+
+public final class McuMgrParametersResponse: McuMgrResponse {
+    
+    public var bufferSize: UInt64!
+    public var bufferCount: UInt64!
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        
+        if case let CBOR.unsignedInt(bufferSize)? = cbor?["buf_size"] { self.bufferSize = bufferSize }
+        if case let CBOR.unsignedInt(bufferCount)? = cbor?["buf_count"] { self.bufferCount = bufferCount }
+    }
+}
+
+// MARK: - McuMgrManifestListResponse
+
+public final class McuMgrManifestListResponse: McuMgrResponse {
+    
+    public class Manifest: CBORMappable {
+        
+        public enum Role: UInt64, CustomStringConvertible {
+            /// Manifest role uninitialized (invalid).
+            case unknown = 0x00
+            /// Manifest describes the entry-point for all Nordic-controlled manifests.
+            case secTop = 0x10
+            /// Manifest describes SDFW firmware and recovery updates.
+            case secSDFW = 0x11
+            /// Manifest describes SYSCTRL firmware update and boot procedures.
+            case secSYSCTRL = 0x12
+            /// Manifest describes the entry-point for all OEM-controlled manifests.
+            case appRoot = 0x20
+            /// Manifest describes OEM-specific recovery procedure.
+            case appRecovery = 0x21
+            /// Manifest describes OEM-specific binaries, specific for application core.
+            case appLocalOne = 0x22
+            /// Manifest describes OEM-specific binaries, specific for application core.
+            case appLocalTwo = 0x23
+            /// Manifest describes OEM-specific binaries, specific for application core.
+            case appLocalThree = 0x24
+            /// Manifest describes radio part of OEM-specific recovery procedure.
+            case radioRecovery = 0x30
+            /// Manifest describes OEM-specific binaries, specific for radio core.
+            case radioLocalOne = 0x31
+            /// Manifest describes OEM-specific binaries, specific for radio core.
+            case radioLocalTwo = 0x32
+            
+            public var description: String {
+                switch self {
+                case .unknown:
+                    return "Unknown"
+                case .secTop:
+                    return "Entry-point for all Nordic-controlled manifests"
+                case .secSDFW:
+                    return "SDFW firmware and recovery updates"
+                case .secSYSCTRL:
+                    return "SYSCTRL firmware update and boot procedures"
+                case .appRoot:
+                    return "Entry-point for all OEM-controlled manifests"
+                case .appRecovery:
+                    return "OEM-Specific Application Core Recovery procedure"
+                case .appLocalOne, .appLocalTwo, .appLocalThree:
+                    return "OEM-Specific Binary for Application Core"
+                case .radioRecovery:
+                    return "OEM-Specific Radio Core Recovery procedure"
+                case .radioLocalOne, .radioLocalTwo:
+                    return "OEM-Specific Binary for Radio Core"
+                }
+            }
+        }
+        
+        public var role: Role?
+        
+        public required init(cbor: CBOR?) throws {
+            try super.init(cbor: cbor)
+            if case let CBOR.unsignedInt(roleValue)? = cbor?["role"] {
+                self.role = Role(rawValue: roleValue)
+            }
+        }
+    }
+    
+    public var manifests: [Manifest]
+    
+    public required init(cbor: CBOR?) throws {
+        if case let CBOR.array(manifests)? = cbor?["manifests"] {
+            self.manifests = try CBOR.toObjectArray(array: manifests) ?? []
+        } else {
+            self.manifests = []
+        }
+        try super.init(cbor: cbor)
+    }
+}
+
+// MARK: - McuMgrManifestStateResponse
+
+public final class McuMgrManifestStateResponse: McuMgrResponse {
+    
+    public var classID: [UInt8]?
+    public var vendorID: [UInt8]?
+    public var downgradePreventionPolicy: DowngradePreventionPolicy?
+    public var independentUpdateabilityPolicy: IndependentUpdateabilityPolicy?
+    public var signatureVerificationPolicy: SignatureVerificationPolicy?
+    public var digest: [UInt8]?
+    public var digestAlgorithm: DigestAlgorithm?
+    public var signatureCheck: SignatureVerification?
+    public var sequenceNumber: UInt64?
+    
+    public enum DigestAlgorithm: Int, RawRepresentable, Codable, CustomStringConvertible {
+        case sha256 = -16
+        case sha512 = -44
+        
+        public var description: String {
+            switch self {
+            case .sha256:
+                return "SHA256"
+            case .sha512:
+                return "SHA512"
+            }
+        }
+    }
+    
+    public enum SignatureVerification: UInt64, RawRepresentable, Codable, CustomStringConvertible {
+        case notChecked = 2
+        case failed = 3
+        case passed = 4
+        
+        public var description: String {
+            switch self {
+            case .notChecked:
+                return "Signature Verification is not performed."
+            case .failed:
+                return "Signature Verification has failed."
+            case .passed:
+                return "Signature Verification passed."
+            }
+        }
+    }
+    
+    public enum DowngradePreventionPolicy: UInt64, RawRepresentable, Codable, CustomStringConvertible {
+        case disabled = 1
+        case enabled = 2
+        case unknown = 3
+        
+        public var description: String {
+            switch self {
+            case .disabled:
+                return "No downgrade prevention."
+            case .enabled:
+                return "Update forbidden if candidate version is lower than installed version."
+            case .unknown:
+                return "Unknown downgrade prevention policy."
+            }
+        }
+    }
+    
+    public enum IndependentUpdateabilityPolicy: UInt64, RawRepresentable, Codable, CustomStringConvertible {
+        case denied = 1
+        case allowed = 2
+        case unknown = 3
+        
+        public var description: String {
+            switch self {
+            case .denied:
+                return "Independent update is forbidden."
+            case .allowed:
+                return "Independent update is allowed."
+            case .unknown:
+                return "Unknown independent updateability policy."
+            }
+        }
+    }
+    
+    public enum SignatureVerificationPolicy: UInt64, RawRepresentable, Codable, CustomStringConvertible {
+        case disabled = 1
+        case enabledOnUpdate = 2
+        case enabledOnUpdateAndBoot = 3
+        case unknown
+        
+        public var description: String {
+            switch self {
+            case .disabled:
+                return "Do not verify manifest signature."
+            case .enabledOnUpdate:
+                return "Verify the manifest signature only when performing an update."
+            case .enabledOnUpdateAndBoot:
+                return "Verify the manifest signature both when performing an update and booting."
+            case .unknown:
+                return "Unknown signature verification policy."
+            }
+        }
+    }
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.byteString(classID)? = cbor?["class_id"] {
+            self.classID = classID
+        }
+        if case let CBOR.byteString(vendorID)? = cbor?["vendor_id"] {
+            self.vendorID = vendorID
+        }
+        if case let CBOR.unsignedInt(downgradePreventionPolicy)? = cbor?["downgrade_prevention_policy"] {
+            self.downgradePreventionPolicy = DowngradePreventionPolicy(rawValue: downgradePreventionPolicy)
+        }
+        if case let CBOR.unsignedInt(independentUpdateabilityPolicy)? = cbor?["independent_updateability_policy"] {
+            self.independentUpdateabilityPolicy = IndependentUpdateabilityPolicy(rawValue: independentUpdateabilityPolicy)
+        }
+        if case let CBOR.unsignedInt(signatureVerificationPolicy)? = cbor?["signature_verification_policy"] {
+            self.signatureVerificationPolicy = SignatureVerificationPolicy(rawValue: signatureVerificationPolicy)
+        }
+        if case let CBOR.byteString(digest)? = cbor?["digest"] {
+            self.digest = digest
+        }
+        if case let CBOR.unsignedInt(signatureCheck)? = cbor?["signature_check"] {
+            self.signatureCheck = SignatureVerification(rawValue: signatureCheck)
+        }
+        if case let CBOR.negativeInt(digestAlgorithm)? = cbor?["digest_algorithm"] {
+            // -1 due to a known CBOR library issue when parsing negative integers.
+            self.digestAlgorithm = DigestAlgorithm(rawValue: (Int(digestAlgorithm) * -1) - 1)
+        }
+        if case let CBOR.unsignedInt(sequenceNumber)? = cbor?["sequence_number"] {
+            self.sequenceNumber = sequenceNumber
+        }
+    }
+}
+
+// MARK: - SuitListResponse
+
+/**
+ This response type is not a part of the McuMgr/SUIT Protocol. We've added it to make the library API side match what most other APIs do, which is to return a ``McuMgrResponse`` for List in ``SuitManager``.
+ */
+public final class SuitListResponse: McuMgrResponse {
+    
+    public var roles: [McuMgrManifestListResponse.Manifest.Role]?
+    public var states: [McuMgrManifestStateResponse]?
+    
+    /**
+     Disclaimer: this is not used. I wrote this to make the library look good. The sole purpose of ``SuitListResponse`` is to have a ``McuMgrResponse`` type to return for its own LIST command variant.
+     */
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.array(roles)? = cbor?["roles"] {
+            self.roles = roles.compactMap { (cbor: CBOR) -> McuMgrManifestListResponse.Manifest.Role? in
+                guard case let CBOR.unsignedInt(roleValue) = cbor else { return nil }
+                return McuMgrManifestListResponse.Manifest.Role(rawValue: roleValue)
+            }
+        }
+        if case let CBOR.array(states)? = cbor?["states"] {
+            self.states = try CBOR.toObjectArray(array: states)
+        }
+    }
+}
+
+// MARK: - McuMgrPollResponse
+
+public final class McuMgrPollResponse: McuMgrResponse {
+    
+    /**
+     * Session identifier. Non-zero value, unique for image request.
+     * Not provided if there is no pending image request.
+     */
+    public var sessionID: UInt64?
+    
+    /**
+     * Resource identifier, typically in form of a URI.
+     * Not provided if there is no pending image request.
+     */
+    public var resourceID: String?
+    
+    /**
+     * Checks whether the device is awaiting a resource.
+     *  - Returns: `true`, if the client should deliver requested image to proceed with the update, false otherwise.
+     */
+    public var isRequestingResource: Bool { sessionID != nil }
+    
+    public var resource: FirmwareUpgradeResource? {
+        guard let resourceID else { return nil }
+        if resourceID.hasPrefix("file://") {
+            let filename = String(resourceID.suffix(from: "file://".endIndex))
+            return .file(name: filename)
+        }
+        return nil
+    }
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.unsignedInt(sessionID)? = cbor?["stream_session_id"] {
+            self.sessionID = sessionID
+        }
+        if case let CBOR.byteString(resourceID)? = cbor?["resource_id"] {
+            self.resourceID = String(bytes: Data(resourceID), encoding: .utf8)
+        }
+    }
+}
+
+// MARK: - AppInfoResponse
+
+public final class AppInfoResponse: McuMgrResponse {
+    
+    public var response: String!
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.utf8String(output)? = cbor?["output"] {
+            self.response = output
+        }
+    }
+}
+
+// MARK: - BootloaderInfoResponse
+
+public final class BootloaderInfoResponse: McuMgrResponse {
+    
+    public enum Bootloader: String, Codable, CustomDebugStringConvertible {
+        case unknown = ""
+        case mcuboot = "MCUboot"
+        case suit = "SUIT"
+        
+        public var description: String {
+            switch self {
+            case .unknown:
+                return "Unknown"
+            case .mcuboot, .suit:
+                return rawValue
+            }
+        }
+        
+        public var debugDescription: String { description }
+    }
+    
+    public enum Mode: Int, Codable, CustomStringConvertible, CustomDebugStringConvertible {
+        case unknown = -1
+        case singleApplication = 0
+        case swapUsingScratch = 1
+        case overwrite = 2
+        case swapNoScratch = 3
+        case directXIPNoRevert = 4
+        case directXIPWithRevert = 5
+        case RAMLoader = 6
+        
+        /**
+         Intended for use cases where it's not important to know what kind of DirectXIP
+         variant this Bootloader Mode might represent, but instead, whether it's
+         DirectXIP or not.
+         */
+        public var isDirectXIP: Bool {
+            return self == .directXIPNoRevert || self == .directXIPWithRevert
+        }
+        
+        public var description: String {
+            switch self {
+            case .unknown:
+                return "Unknown"
+            case .singleApplication:
+                return "Single application"
+            case .swapUsingScratch:
+                return "Swap using scratch partition"
+            case .overwrite:
+                return "Overwrite (upgrade-only)"
+            case .swapNoScratch:
+                return "Swap without scratch"
+            case .directXIPNoRevert:
+                return "Direct-XIP without revert"
+            case .directXIPWithRevert:
+                return "Direct-XIP with revert"
+            case .RAMLoader:
+                return "RAM Loader"
+            }
+        }
+        
+        public var debugDescription: String { description }
+    }
+    
+    public var bootloader: Bootloader?
+    public var mode: Mode?
+    public var noDowngrade: Bool?
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.utf8String(bootloaderString)? = cbor?["bootloader"] {
+            self.bootloader = Bootloader(rawValue: bootloaderString)
+        }
+        if case let CBOR.unsignedInt(mode)? = cbor?["mode"] {
+            self.mode = Mode(rawValue: Int(mode))
+        }
+        if case let CBOR.boolean(noDowngrade)? = cbor?["no-downgrade"] {
+            self.noDowngrade = noDowngrade
         }
     }
 }
@@ -373,29 +813,39 @@ public class McuMgrImageStateResponse: McuMgrResponse {
 
 extension McuMgrImageStateResponse {
     
-    public class ImageSlot: CBORMappable {
+    public class ImageSlot: CBORMappable, CustomDebugStringConvertible {
         
         // MARK: Properties
         
         /// The (zero) index of this image.
-        public var image: UInt64! { unsignedUInt64(defaultValue: 0) }
+        public var image: UInt64 { unsignedUInt64(defaultValue: 0) }
         /// The (zero) index of this image slot (0 for primary, 1 for secondary).
-        public var slot: UInt64! { unsignedUInt64() }
-        /// The verison of the image.
-        public var version: String! { utf8String() }
-        /// The sha256 hash of the image.
-        public var hash: [UInt8]! { byteString() }
+        public var slot: UInt64 { unsignedUInt64(defaultValue: 0) }
+        /// The version of the image.
+        public var version: String? { utf8String() }
+        /// The SHA256 hash of the image.
+        public var hash: [UInt8] { byteString() }
         /// Bootable flag.
-        public var bootable: Bool! { boolean() }
+        public var bootable: Bool { boolean() }
         /// Pending flag. A pending image will be booted into on reset.
-        public var pending: Bool! { boolean() }
-        /// Confired flag. A confirmed image will always be booted into (unless
+        public var pending: Bool { boolean() }
+        /// Confirmed flag. A confirmed image will always be booted into (unless
         /// another image is pending.
-        public var confirmed: Bool! { boolean() }
+        public var confirmed: Bool { boolean() }
         /// Active flag. Set if the image in this slot is active.
-        public var active: Bool! { boolean() }
+        public var active: Bool { boolean() }
         /// Permanent flag. Set if this image is permanent.
-        public var permanent: Bool! { boolean() }
+        public var permanent: Bool { boolean() }
+        
+        // MARK: CustomDebugStringConvertible
+        
+        public var debugDescription: String {
+            return """
+            Hash: \(hash)
+            Image \(image), Slot \(slot), Version \(version)
+            Bootable \(bootable ? "Yes" : "No"), Pending \(pending ? "Yes" : "No"), Confirmed \(confirmed ? "Yes" : "No"), Active \(active ? "Yes" : "No"), Permanent \(permanent ? "Yes" : "No")
+            """
+        }
         
         // MARK: Init
         
@@ -408,38 +858,48 @@ extension McuMgrImageStateResponse {
         
         // MARK: Private
         
-        private func unsignedUInt64(forKey key: String = #function, defaultValue: UInt64? = nil) -> UInt64! {
+        private func unsignedUInt64(forKey key: String = #function, defaultValue: UInt64) -> UInt64 {
             guard case let CBOR.unsignedInt(int)? = cbor?[.utf8String(key)] else { return defaultValue }
             return int
         }
         
-        private func utf8String(forKey key: String = #function) -> String! {
+        private func utf8String(forKey key: String = #function) -> String? {
             guard case let CBOR.utf8String(string)? = cbor?[.utf8String(key)] else { return nil }
             return string
         }
         
-        private func byteString(forKey key: String = #function) -> [UInt8]! {
-            guard case let CBOR.byteString(cString)? = cbor?[.utf8String(key)] else { return nil }
+        private func byteString(forKey key: String = #function) -> [UInt8] {
+            guard case let CBOR.byteString(cString)? = cbor?[.utf8String(key)] else { return [] }
             return cString
         }
         
-        private func boolean(forKey key: String = #function) -> Bool! {
-            guard case let CBOR.boolean(bool)? = cbor?[.utf8String(key)] else { return nil }
+        private func boolean(forKey key: String = #function) -> Bool {
+            guard case let CBOR.boolean(bool)? = cbor?[.utf8String(key)] else { return false }
             return bool
         }
     }
 }
 
+// MARK: - McuMgrUploadResponse
+
 public class McuMgrUploadResponse: McuMgrResponse {
     
     /// Offset to send the next packet of image data from.
     public var off: UInt64?
+    public var match: Bool?
     
     public required init(cbor: CBOR?) throws {
         try super.init(cbor: cbor)
-        if case let CBOR.unsignedInt(off)? = cbor?["off"] {self.off = off}
+        if case let CBOR.unsignedInt(off)? = cbor?["off"] {
+            self.off = off
+        }
+        if case let CBOR.boolean(match)? = cbor?["match"] {
+            self.match = match
+        }
     }
 }
+
+// MARK: - McuMgrCoreLoadResponse
 
 public class McuMgrCoreLoadResponse: McuMgrResponse {
     
@@ -474,6 +934,8 @@ public class McuMgrFsUploadResponse: McuMgrResponse {
     }
 }
 
+// MARK: - McuMgrFsDownloadResponse
+
 public class McuMgrFsDownloadResponse: McuMgrResponse {
     
     /// Offset to send the next packet of image data from.
@@ -488,6 +950,81 @@ public class McuMgrFsDownloadResponse: McuMgrResponse {
         if case let CBOR.unsignedInt(off)? = cbor?["off"] {self.off = off}
         if case let CBOR.unsignedInt(len)? = cbor?["len"] {self.len = len}
         if case let CBOR.byteString(data)? = cbor?["data"] {self.data = data}
+    }
+}
+
+// MARK: - McuMgrFilesystemCrc32Response
+
+public class McuMgrFilesystemCrc32Response: McuMgrResponse {
+    
+    // Type of hash/checksum that was performed.
+    public var type: String?
+    // Offset that checksum calculation started at
+    public var off: UInt64?
+    // Length of input data used for hash/checksum generation (in bytes)
+    public var len: UInt64?
+    // IEEE CRC32 checksum (uint32 represented as type long)
+    public var output: UInt64?
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.utf8String(type)? = cbor?["type"] {
+            self.type = type
+        }
+        if case let CBOR.unsignedInt(off)? = cbor?["off"] {
+            self.off = off
+        }
+        if case let CBOR.unsignedInt(len)? = cbor?["len"] {
+            self.len = len
+        }
+        if case let CBOR.unsignedInt(output)? = cbor?["output"] {
+            self.output = output
+        }
+    }
+}
+
+// MARK: - McuMgrFilesystemSha256Response
+
+public class McuMgrFilesystemSha256Response: McuMgrResponse {
+    
+    // Type of hash/checksum that was performed.
+    public var type: String?
+    // Offset that checksum calculation started at.
+    public var off: UInt64?
+    // Length of input data used for hash/checksum generation (in bytes)
+    public var len: UInt64?
+    // 32-byte SHA256 (Secure Hash Algorithm)
+    public var output: [UInt8]?
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.utf8String(type)? = cbor?["type"] {
+            self.type = type
+        }
+        if case let CBOR.unsignedInt(off)? = cbor?["off"] {
+            self.off = off
+        }
+        if case let CBOR.unsignedInt(len)? = cbor?["len"] {
+            self.len = len
+        }
+        if case let CBOR.byteString(output)? = cbor?["output"] {
+            self.output = output
+        }
+    }
+}
+
+// MARK: - McuMgrFilesystemStatusResponse
+
+public class McuMgrFilesystemStatusResponse: McuMgrResponse {
+    
+    /// The length of the file.
+    public var len: UInt64?
+    
+    public required init(cbor: CBOR?) throws {
+        try super.init(cbor: cbor)
+        if case let CBOR.unsignedInt(len)? = cbor?["len"] {
+            self.len = len
+        }
     }
 }
 
@@ -508,6 +1045,8 @@ public class McuMgrLevelListResponse: McuMgrResponse {
     }
 }
 
+// MARK: - McuMgrLogListResponse
+
 public class McuMgrLogListResponse: McuMgrResponse {
     
     /// Log levels.
@@ -520,6 +1059,8 @@ public class McuMgrLogListResponse: McuMgrResponse {
         }
     }
 }
+
+// MARK: - McuMgrLogResponse
 
 public class McuMgrLogResponse: McuMgrResponse {
     
@@ -608,6 +1149,8 @@ public class McuMgrStatsResponse: McuMgrResponse {
         }
     }
 }
+
+// MARK: - McuMgrStatsListResponse
 
 public class McuMgrStatsListResponse: McuMgrResponse {
     
